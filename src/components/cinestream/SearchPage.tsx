@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { MBSubject, GENRES } from "@/lib/moviebox";
-import { fetchSearch } from "@/lib/api-client";
+import { safeJson } from "@/lib/utils";
 import { MovieCard } from "./MovieCard";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApp } from "@/stores/app-store";
@@ -48,12 +48,20 @@ export function SearchPage({ keyword }: SearchPageProps) {
       if (page === 1) setLoading(true);
       else setLoadingMore(true);
       try {
-        const json = await fetchSearch(keyword, page, 24, 0) as SearchResponse;
+        const res = await fetch("/api/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword, page, perPage: 24, subjectType: 0 }),
+        });
+        // safeJson handles empty/invalid bodies without throwing
+        // "Unexpected end of JSON input".
+        const json = await safeJson<SearchResponse>(res, "Search failed");
         if (cancelled) return;
         const newItems = json?.data?.items ?? [];
         setItems((prev) => (page === 1 ? newItems : [...prev, ...newItems]));
         setHasMore(Boolean(json?.data?.pager?.hasMore));
       } catch {
+        // Network error — safeJson already handled body parse issues.
         if (!cancelled) {
           if (page === 1) setItems([]);
           setHasMore(false);

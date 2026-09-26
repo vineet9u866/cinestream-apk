@@ -9,7 +9,6 @@ import {
   subjectTypeLabel,
 } from "@/lib/moviebox";
 import { safeJson } from "@/lib/utils";
-import { fetchDetail, fetchRecommendations } from "@/lib/api-client";
 import { useApp } from "@/stores/app-store";
 import { VideoPlayer } from "./VideoPlayer";
 import { MovieCard } from "./MovieCard";
@@ -54,8 +53,16 @@ export function DetailPage({ subjectId, subjectType }: DetailPageProps) {
         // that an empty or invalid response body doesn't throw an
         // unhandled "Unexpected end of JSON input" error.
         const [d, r] = await Promise.all([
-          fetchDetail(subjectId) as Promise<DetailResponse>,
-          fetchRecommendations(subjectId, subjectType) as Promise<RecResponse>,
+          safeJson<DetailResponse>(
+            await fetch(`/api/detail?subjectId=${subjectId}`),
+            "Failed to load title details"
+          ),
+          safeJson<RecResponse>(
+            await fetch(
+              `/api/recommendations?subjectId=${subjectId}&subjectType=${subjectType}`
+            ),
+            "Failed to load recommendations"
+          ),
         ]);
         if (cancelled) return;
         if (d.code !== 0 || !d.data) {

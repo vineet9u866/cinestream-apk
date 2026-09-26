@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { MBSubject, GENRES } from "@/lib/moviebox";
-import { fetchFilter } from "@/lib/api-client";
+import { safeJson } from "@/lib/utils";
 import { MovieCard } from "./MovieCard";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -55,7 +55,14 @@ export function BrowsePage({ subjectType, genre, title }: BrowsePageProps) {
           sort: activeGenre ? "hot" : "latest",
         };
         if (activeGenre) body.genre = activeGenre;
-        const json = await fetchFilter(body as any);
+        const res = await fetch("/api/filter", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        // safeJson handles empty/invalid bodies without throwing
+        // "Unexpected end of JSON input".
+        const json = await safeJson<FilterResponse>(res, "Failed to load titles");
         if (cancelled) return;
         let newItems = json?.data?.items ?? [];
         // Filter client-side to honor the requested subjectType.

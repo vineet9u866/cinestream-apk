@@ -1,4 +1,4 @@
-name: Build Android APK (Standalone)
+name: Build Android APK (Thin WebView Wrapper)
 
 on:
   push:
@@ -30,26 +30,43 @@ jobs:
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager --install "platforms;android-35" "build-tools;35.0.0" > /dev/null 2>&1 || true
           echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Generate Prisma client (needed for type imports)
-        run: npx prisma generate || true
+      - name: Generate Prisma client
+        run: npx prisma generate
 
-      - name: Build Next.js static export
-        env:
-          NEXT_OUTPUT: export
-        run: npx next build
-
-      - name: Verify static export
+      - name: Create offline fallback page (webDir placeholder)
         run: |
-          ls -la out/
-          echo "Static export size:"
-          du -sh out/
+          mkdir -p out
+          cat > out/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+            <title>CineStream</title>
+            <style>
+              html, body { margin: 0; padding: 0; height: 100%; background: #0f0f17; color: #fff; font-family: system-ui, sans-serif; }
+              .container { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; text-align: center; padding: 1.5rem; }
+              h1 { color: #e50914; font-size: 2rem; margin: 0 0 0.75rem; }
+              p { color: #888; font-size: 0.95rem; max-width: 32ch; line-height: 1.6; margin: 0.5rem 0; }
+              code { background: #1f1f2e; padding: 0.15rem 0.4rem; border-radius: 4px; color: #e50914; font-size: 0.85rem; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>CineStream</h1>
+              <p>You're seeing this page because <code>SERVER_URL</code> in <code>capacitor.config.ts</code> is unreachable.</p>
+              <p>To fix: deploy your Next.js app to Vercel/Railway/Render, then update <code>SERVER_URL</code> and rebuild the APK.</p>
+              <p>See <code>capacitor.config.ts</code> for detailed instructions.</p>
+            </div>
+          </body>
+          </html>
+          EOF
 
-      - name: Sync Capacitor (copy out/ into Android assets)
+      - name: Sync Capacitor (copies offline fallback + capacitor.config.json)
         run: npx cap sync android
 
       - name: Build Debug APK
@@ -73,3 +90,20 @@ jobs:
             file "$APK_PATH"
             ls -lh "$APK_PATH"
           fi
+
+      - name: Print SERVER_URL reminder
+        run: |
+          echo "============================================================"
+          echo "  APK built as a thin webview wrapper."
+          echo "  It will load: (from capacitor.config.ts)"
+          grep "SERVER_URL =" capacitor.config.ts | head -1
+          echo ""
+          echo "  If the URL above is still the placeholder"
+          echo "  (https://cinestream-demo.vercel.app), the APK will show"
+          echo "  an 'offline fallback' page when opened."
+          echo ""
+          echo "  To make the APK show your real web app:"
+          echo "  1. Deploy the Next.js app to Vercel/Railway/Render"
+          echo "  2. Update SERVER_URL in capacitor.config.ts"
+          echo "  3. Push to main — GitHub Actions rebuilds the APK"
+          echo "============================================================"
