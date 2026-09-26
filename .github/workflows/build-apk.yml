@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Android APK (Standalone)
 
 on:
   push:
@@ -25,47 +25,31 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Configure Android SDK (accept licenses)
+      - name: Configure Android SDK (SDK 35 + build-tools 35.0.0)
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" > /dev/null 2>&1 || true
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          sdkmanager --list_installed 2>/dev/null | head -20 || true
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Generate Prisma client
-        run: npx prisma generate
+      - name: Generate Prisma client (needed for type imports)
+        run: npx prisma generate || true
 
-      - name: Create static export directory (webDir placeholder)
+      - name: Build Next.js static export
+        env:
+          NEXT_OUTPUT: export
+        run: npx next build
+
+      - name: Verify static export
         run: |
-          mkdir -p out
-          cat > out/index.html <<'EOF'
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="UTF-8" />
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-            <title>CineStream</title>
-            <style>
-              html, body { margin: 0; padding: 0; height: 100%; background: #0f0f17; color: #fff; font-family: system-ui, sans-serif; }
-              .container { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; text-align: center; padding: 1rem; }
-              h1 { color: #e50914; font-size: 1.75rem; margin-bottom: 0.5rem; }
-              p { color: #888; font-size: 0.9rem; max-width: 28ch; line-height: 1.5; }
-            </style>
-          </head>
-          <body>
-            <div class="container">
-              <h1>CineStream</h1>
-              <p>Offline fallback. Configure server.url in capacitor.config.ts to your deployed Next.js app.</p>
-            </div>
-          </body>
-          </html>
-          EOF
+          ls -la out/
+          echo "Static export size:"
+          du -sh out/
 
-      - name: Sync Capacitor
+      - name: Sync Capacitor (copy out/ into Android assets)
         run: npx cap sync android
 
       - name: Build Debug APK
@@ -75,7 +59,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cinestream-debug-apk
+          name: cinestream-apk
           path: android/app/build/outputs/apk/debug/*.apk
           retention-days: 90
           if-no-files-found: error

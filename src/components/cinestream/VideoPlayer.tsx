@@ -4,6 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { MBStream, MBDub, MBCaption } from "@/lib/moviebox";
 import { safeJson } from "@/lib/utils";
 import {
+  fetchPlay,
+  fetchCaptions as fetchCaptionsApi,
+  fetchSubtitleText,
+  srtToVtt,
+  translateSubtitle,
+  proxyStreamUrl,
+} from "@/lib/api-client";
+import {
   getSubtitlePref,
   setSubtitlePref,
   clearSubtitlePref,
@@ -435,12 +443,7 @@ export function VideoPlayer({
       return "";
     });
     try {
-      const res = await fetch(
-        `/api/play?subjectId=${subjectId}&detailPath=${encodeURIComponent(detailPath)}&se=${se}&ep=${ep}`
-      );
-      // Use safeJson so an empty/invalid response body doesn't throw
-      // an unhandled "Unexpected end of JSON input" error.
-      const json = await safeJson<PlayResponse>(res, "Failed to load stream");
+      const json = await fetchPlay(subjectId, detailPath, se, ep) as PlayResponse;
       // Ignore stale responses (a newer request has been issued)
       if (reqId !== requestIdRef.current) return;
       if (json.code !== 0) {
@@ -506,12 +509,7 @@ export function VideoPlayer({
     if (!streamId) return;
     setCaptionsLoading(true);
     try {
-      const res = await fetch(
-        `/api/caption?streamId=${streamId}&subjectId=${subjectId}&detailPath=${encodeURIComponent(detailPath)}`
-      );
-      // safeJson guards against empty/invalid bodies that would otherwise
-      // throw "Unexpected end of JSON input".
-      const json = await safeJson<CaptionResponse>(res, "Failed to load subtitles");
+      const json = await fetchCaptionsApi(streamId, subjectId, detailPath) as CaptionResponse;
       if (json.code === 0 && json.data?.captions) {
         setCaptions(json.data.captions);
         // Auto-restore the subtitle selection. For VIEWERS in a watch
@@ -607,15 +605,9 @@ export function VideoPlayer({
     }
 
     try {
-      // Fetch the SRT and convert to WebVTT in one round-trip.
-      const subRes = await fetch(
-        `/api/subtitle?url=${encodeURIComponent(cap.url)}`
-      );
-      if (!subRes.ok) {
-        console.warn("Subtitle fetch failed:", subRes.status);
-        return;
-      }
-      const vttText = await subRes.text();
+      // Fetch the SRT client-side and convert to WebVTT in JS.
+      const srtText = await fetchSubtitleText(cap.url);
+      const vttText = srtToVtt(srtText);
       // Wrap the VTT in a blob so we can use it as a same-origin track URL
       // (avoids any CORS complications with the <track> element).
       const blob = new Blob([vttText], { type: "text/vtt" });
@@ -677,50 +669,19 @@ export function VideoPlayer({
 
     try {
       // Step 1: Fetch the source SRT and convert to VTT
-      const subRes = await fetch(
-        `/api/subtitle?url=${encodeURIComponent(sourceCap.url)}`
-      );
-      if (!subRes.ok) {
-        throw new Error(`Source subtitle fetch failed: ${subRes.status}`);
-      }
-      const sourceVtt = await subRes.text();
+      const srtText = await fetchSubtitleText(sourceCap.url);
+      const sourceVtt = srtToVtt(srtText);
 
-      // Step 2: Translate via the LLM. Use a generous 5-minute timeout
-      // since translating a full movie can take 1-3 minutes.
+      // Step 2: Translate via the LLM (server-side only; in standalone APK
+      // mode this returns null and we fall back to source subtitle).
       setTranslateMessage(
         `Translating ${sourceCap.lanName} → ${fullLangName(targetLan)}…`
       );
 
-      const translateRes = await fetch(
-        `/api/translate-subtitle?target=${encodeURIComponent(targetLan)}&source=en`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ vtt: sourceVtt }),
-          signal: AbortSignal.timeout(300000), // 5 min
-        }
-      );
+      const translated = await translateSubtitle(sourceVtt, targetLan, "en");
 
-      if (!translateRes.ok) {
-        // Provide a user-friendly error message based on the status code
-        let errMsg = `Translation failed (HTTP ${translateRes.status})`;
-        if (translateRes.status === 502 || translateRes.status === 504) {
-          errMsg = "Translation server timed out. The movie may be too long — try again, or use a native subtitle language instead.";
-        } else if (translateRes.status === 429) {
-          errMsg = "Translation rate limit reached. Please wait a minute and try again.";
-        } else if (translateRes.status >= 500) {
-          errMsg = "Translation server error. Please try again in a moment.";
-        }
-        throw new Error(errMsg);
-      }
-
-      const translated = await safeJson<{ code: number; vtt?: string; message?: string }>(
-        translateRes,
-        "Translation failed"
-      );
-
-      if (translated.code !== 0 || !translated.vtt) {
-        throw new Error(translated.message || "Translation returned no result");
+      if (!translated.vtt) {
+        throw new Error(translated.error || "Translation unavailable in standalone mode");
       }
 
       // Step 3: Wrap the translated VTT in a blob and attach as <track>
@@ -738,23 +699,20 @@ export function VideoPlayer({
       // Fall back to the source subtitle (untranslated)
       setActiveSubtitle(sourceCap.id);
       try {
-        const subRes = await fetch(
-          `/api/subtitle?url=${encodeURIComponent(sourceCap.url)}`
-        );
-        if (subRes.ok) {
-          const vttText = await subRes.text();
-          const blob = new Blob([vttText], { type: "text/vtt" });
-          setTrackSrc(URL.createObjectURL(blob));
-        }
+        const srtText = await fetchSubtitleText(sourceCap.url);
+        const vttText = srtToVtt(srtText);
+        const blob = new Blob([vttText], { type: "text/vtt" });
+        setTrackSrc(URL.createObjectURL(blob));
       } catch {
         // give up silently
       }
     }
   };
 
-  /** Wrap a CDN url with our streaming proxy. */
+  /** Wrap a CDN url. In the APK webview, returns the original URL (CORS
+   * is not enforced, so we can load directly with proper Referer). */
   function proxyUrl(u: string): string {
-    return `/api/stream?url=${encodeURIComponent(u)}`;
+    return proxyStreamUrl(u);
   }
 
   // Load play info on mount + whenever curSe/curEp changes.

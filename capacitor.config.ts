@@ -1,30 +1,19 @@
 import type { CapacitorConfig } from "@capacitor/cli";
 
-// CineStream Android configuration
+// CineStream Android configuration (STANDALONE APK MODE)
 //
-// This app uses Next.js API routes (server-side), so the APK loads a remote URL.
-// Update SERVER_URL below to your deployed Next.js app (e.g. on Vercel, Railway,
-// Netlify, or any host that supports Next.js 16). The APK is a native webview
-// wrapper around your deployed web app.
+// The APK bundles the entire Next.js static export inside the APK. All API
+// calls happen client-side via the CORS proxy in src/lib/moviebox-client.ts.
+// No server required — the app works fully offline once installed.
 //
-// To change the URL:
-//   1. Update SERVER_URL below
-//   2. Push to GitHub — the Actions workflow will rebuild the APK automatically
-//
-// For local development, you can use your machine's LAN IP (e.g.
-// http://192.168.1.100:3000) — make sure your phone is on the same WiFi.
-
-const SERVER_URL = "https://cinestream-demo.vercel.app"; // <-- UPDATE THIS
+// The webDir points to the Next.js static export output ("out" directory).
+// The build workflow runs `NEXT_OUTPUT=export next build` to generate it.
 
 const config: CapacitorConfig = {
   appId: "com.cinestream.app",
   appName: "CineStream",
-  webDir: "out", // Next.js static export output (used as fallback if server.url is unset)
+  webDir: "out",
   bundledWebRuntime: false,
-  server: {
-    url: SERVER_URL,
-    cleartext: true, // allow http:// URLs for local dev
-  },
   android: {
     allowMixedContent: true,
     backgroundColor: "#0f0f17",

@@ -8,7 +8,7 @@ import {
   GENRES,
   PLATFORMS,
 } from "@/lib/moviebox";
-import { safeJson } from "@/lib/utils";
+import { fetchHome, fetchTrending, fetchFilter } from "@/lib/api-client";
 import { useApp } from "@/stores/app-store";
 import { Hero } from "./Hero";
 import { MovieRail } from "./MovieRail";
@@ -41,9 +41,11 @@ export function HomePage() {
         // "Unexpected end of JSON input". Each response gets a fallback
         // object with code=500 on failure, so the UI degrades gracefully.
         const [h, t] = await Promise.all([
-          safeJson<HomeResponse>(await fetch("/api/home"), "Failed to load home feed"),
-          safeJson<TrendingResponse>(await fetch("/api/trending"), "Failed to load trending"),
-        ]);
+          fetchHome() as Promise<HomeResponse>,
+          fetchTrending() as Promise<TrendingResponse>,
+        ]).catch((e) => {
+          return [{ code: 500, message: String(e?.message || e) }, { code: 500 }] as [HomeResponse, TrendingResponse];
+        });
         if (!cancelled) {
           setHome(h);
           setTrending(t);
@@ -141,16 +143,7 @@ function GenreRail({ genre }: { genre: string }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("/api/filter", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ page: 1, perPage: 30, subjectType: 0, genre, sort: "hot" }),
-        });
-        // safeJson handles empty/invalid bodies without throwing.
-        const json = await safeJson<{ code: number; data?: { items: MBSubject[] } }>(
-          res,
-          `Failed to load ${genre} movies`
-        );
+        const json = await fetchFilter({ page: 1, perPage: 30, subjectType: 0, genre, sort: "hot" });
         if (cancelled) return;
         // Filter to actual movies/series/animation only
         const filtered = (json?.data?.items ?? []).filter(

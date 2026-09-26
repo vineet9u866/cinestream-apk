@@ -4,20 +4,60 @@ import { create } from "zustand";
 import { safeJson } from "@/lib/utils";
 
 /**
- * Watch-party client store.
+ * Watch-party client store (standalone APK version).
+ *
+ * In standalone APK mode (no server), watch parties use a localStorage-backed
+ * store. This works for solo testing on the same device. For cross-device
+ * parties, the APK can be rebuilt with a public party backend URL set in
+ * `PARTY_BACKEND_URL` below — when set, all party traffic routes there.
  *
  * Two roles:
- *  - HOST:   creates a party, gets a 6-digit code, broadcasts their playback
- *            state (subject + position) to the server every few seconds.
- *  - VIEWER: joins with a code, polls the server for the host's state, and
- *            navigates to whatever the host is playing. Auto-seeks to the
- *            host's position.
- *
- * Both roles share a chat channel.
- *
- * State sync uses polling (2s) rather than websockets to keep the
- * deployment trivial. The /api/party endpoint is in-memory per instance.
+ *  - HOST:   creates a party, gets a 6-digit code, broadcasts playback state.
+ *  - VIEWER: joins with a code, polls for the host's state, auto-seeks.
  */
+
+// Optional: set this to a public party backend (e.g. https://your-party.fly.dev)
+// to enable cross-device parties. When empty, parties are local-only (same
+// device, useful for testing the UI).
+const PARTY_BACKEND_URL = "";
+
+function partyUrl(path: string): string {
+  if (!PARTY_BACKEND_URL) return path;
+  return `${PARTY_BACKEND_URL}${path}`;
+}
+
+function isLocalMode(): boolean {
+  return !PARTY_BACKEND_URL;
+}
+
+// LocalStorage-backed party registry (used when PARTY_BACKEND_URL is empty)
+const LOCAL_PARTY_KEY = "cs-local-parties";
+function getLocalParties(): Record<string, any> {
+  if (typeof window === "undefined") return {};
+  try {
+    return JSON.parse(localStorage.getItem(LOCAL_PARTY_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+function setLocalParties(p: Record<string, any>): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(LOCAL_PARTY_KEY, JSON.stringify(p));
+}
+function gcLocalParties(): void {
+  if (typeof window === "undefined") return;
+  const parties = getLocalParties();
+  const now = Date.now();
+  const TTL = 4 * 60 * 60 * 1000;
+  let changed = false;
+  for (const code of Object.keys(parties)) {
+    if (now - (parties[code].lastSeen || 0) > TTL) {
+      delete parties[code];
+      changed = true;
+    }
+  }
+  if (changed) setLocalParties(parties);
+}
 
 export interface PartyPlaybackState {
   subjectId: string;
@@ -130,14 +170,32 @@ export const useParty = create<PartyStore>((set, get) => ({
   createParty: async () => {
     set({ connecting: true, error: null });
     try {
-      const res = await fetch("/api/party", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "create" }),
-      });
-      const json = await safeJson<{ code: number; message?: string; data?: { code: string; hostId: string } }>(res, "Failed to create party");
-      if (json.code !== 0) throw new Error(json.message || "Failed to create party");
-      const { code, hostId } = json.data;
+      let code: string;
+      let hostId: string;
+      if (isLocalMode()) {
+        code = genCode();
+        hostId = genId();
+        const parties = getLocalParties();
+        parties[code] = {
+          code,
+          hostId,
+          state: null,
+          chat: [],
+          lastSeen: Date.now(),
+          createdAt: Date.now(),
+        };
+        setLocalParties(parties);
+      } else {
+        const res = await fetch(partyUrl("/api/party"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "create" }),
+        });
+        const json = await safeJson<{ code: number; message?: string; data?: { code: string; hostId: string } }>(res, "Failed to create party");
+        if (json.code !== 0) throw new Error(json.message || "Failed to create party");
+        code = json.data.code;
+        hostId = json.data.hostId;
+      }
       const peerId = getOrCreatePeerId();
       const nickname = getOrCreateNickname();
       set({
@@ -167,14 +225,33 @@ export const useParty = create<PartyStore>((set, get) => ({
     try {
       const peerId = getOrCreatePeerId();
       const nickname = getOrCreateNickname();
-      const res = await fetch("/api/party", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "join", code, peerId }),
-      });
-      const json = await safeJson<{ code: number; message?: string; data?: any }>(res, "Party not found");
-      if (json.code !== 0) throw new Error(json.message || "Party not found");
-      const { hostId, state, chat, peers } = json.data;
+      let hostId: string;
+      let state: any = null;
+      let chat: PartyChatMsg[] = [];
+      let peers = 1;
+      if (isLocalMode()) {
+        gcLocalParties();
+        const parties = getLocalParties();
+        const p = parties[code];
+        if (!p) throw new Error("Party not found");
+        p.lastSeen = Date.now();
+        setLocalParties(parties);
+        hostId = p.hostId;
+        state = p.state;
+        chat = p.chat || [];
+      } else {
+        const res = await fetch(partyUrl("/api/party"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "join", code, peerId }),
+        });
+        const json = await safeJson<{ code: number; message?: string; data?: any }>(res, "Party not found");
+        if (json.code !== 0) throw new Error(json.message || "Party not found");
+        hostId = json.data.hostId;
+        state = json.data.state;
+        chat = json.data.chat || [];
+        peers = json.data.peers || 1;
+      }
       set({
         role: "viewer",
         code,
@@ -183,7 +260,7 @@ export const useParty = create<PartyStore>((set, get) => ({
         nickname,
         state: state ?? null,
         chat: chat ?? [],
-        peers: peers ?? 1,
+        peers,
         error: null,
       });
       get()._startPolling();
@@ -198,16 +275,26 @@ export const useParty = create<PartyStore>((set, get) => ({
     const { role, code, hostId } = get();
     if (role !== "host" || !code || !hostId) return;
     try {
-      await fetch("/api/party", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "update",
-          code,
-          hostId,
-          state: { ...s, updatedAt: Date.now() },
-        }),
-      });
+      if (isLocalMode()) {
+        const parties = getLocalParties();
+        const p = parties[code];
+        if (p) {
+          p.state = { ...s, updatedAt: Date.now() };
+          p.lastSeen = Date.now();
+          setLocalParties(parties);
+        }
+      } else {
+        await fetch(partyUrl("/api/party"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "update",
+            code,
+            hostId,
+            state: { ...s, updatedAt: Date.now() },
+          }),
+        });
+      }
     } catch {
       // ignore — best-effort broadcast
     }
@@ -226,17 +313,27 @@ export const useParty = create<PartyStore>((set, get) => ({
     };
     set((s) => ({ chat: [...s.chat, optimistic] }));
     try {
-      await fetch("/api/party", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "chat",
-          code,
-          peerId,
-          user: nickname,
-          text: trimmed,
-        }),
-      });
+      if (isLocalMode()) {
+        const parties = getLocalParties();
+        const p = parties[code];
+        if (p) {
+          p.chat = [...(p.chat || []), optimistic].slice(-100);
+          p.lastSeen = Date.now();
+          setLocalParties(parties);
+        }
+      } else {
+        await fetch(partyUrl("/api/party"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "chat",
+            code,
+            peerId,
+            user: nickname,
+            text: trimmed,
+          }),
+        });
+      }
     } catch {
       // ignore
     }
@@ -259,21 +356,46 @@ export const useParty = create<PartyStore>((set, get) => ({
     const { code, role } = get();
     if (!code) return;
     try {
-      const res = await fetch(`/api/party?action=state&code=${encodeURIComponent(code)}`);
-      const json = await safeJson<{ code: number; data?: any }>(res, "Failed to poll party state");
-      if (json.code !== 0) {
-        // Party may have been expired server-side
-        if (json.code === 404) {
-          get()._stopPolling();
-          set({ error: "Party ended", role: "none", code: null, state: null });
+      let state: any = null;
+      let chat: PartyChatMsg[] = [];
+      let peers = 1;
+      let hostId: string | null = null;
+      let ended = false;
+      if (isLocalMode()) {
+        gcLocalParties();
+        const parties = getLocalParties();
+        const p = parties[code];
+        if (!p) {
+          ended = true;
+        } else {
+          state = p.state;
+          chat = p.chat || [];
+          peers = 1;
+          hostId = p.hostId;
+          p.lastSeen = Date.now();
+          setLocalParties(parties);
         }
+      } else {
+        const res = await fetch(partyUrl(`/api/party?action=state&code=${encodeURIComponent(code)}`));
+        const json = await safeJson<{ code: number; data?: any }>(res, "Failed to poll party state");
+        if (json.code === 404) {
+          ended = true;
+        } else if (json.code === 0 && json.data) {
+          state = json.data.state;
+          chat = json.data.chat || [];
+          peers = json.data.peers || 0;
+          hostId = json.data.hostId;
+        }
+      }
+      if (ended) {
+        get()._stopPolling();
+        set({ error: "Party ended", role: "none", code: null, state: null });
         return;
       }
-      const { state, chat, peers, hostId } = json.data;
       set({
         state: state ?? null,
         chat: chat ?? [],
-        peers: peers ?? 0,
+        peers,
         hostId: hostId ?? get().hostId,
       });
       void role;
@@ -288,12 +410,13 @@ export const useParty = create<PartyStore>((set, get) => ({
     pollTimer = setInterval(() => {
       void get().poll();
     }, 2000);
-    // Heartbeat every 10s so the server knows we're alive.
+    // Heartbeat every 10s (only needed in remote mode; local mode is always alive)
     const { code, peerId } = get();
     heartbeatTimer = setInterval(async () => {
       if (!code || !peerId) return;
+      if (isLocalMode()) return; // no-op
       try {
-        await fetch("/api/party", {
+        await fetch(partyUrl("/api/party"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "heartbeat", code, peerId }),
