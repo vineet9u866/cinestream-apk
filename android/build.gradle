@@ -14,8 +14,6 @@ buildscript {
 
 apply from: "variables.gradle"
 
-apply from: "capacitor.settings.gradle"
-
 allprojects {
     repositories {
         google()
