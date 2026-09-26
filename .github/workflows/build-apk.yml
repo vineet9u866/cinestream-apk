@@ -1,0 +1,91 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-34
+            build-tools;34.0.0
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Create static export directory (webDir placeholder)
+        run: |
+          mkdir -p out
+          cat > out/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+            <title>CineStream</title>
+            <style>
+              html, body { margin: 0; padding: 0; height: 100%; background: #0f0f17; color: #fff; font-family: system-ui, sans-serif; }
+              .container { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; text-align: center; padding: 1rem; }
+              h1 { color: #e50914; font-size: 1.75rem; margin-bottom: 0.5rem; }
+              p { color: #888; font-size: 0.9rem; max-width: 28ch; line-height: 1.5; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>CineStream</h1>
+              <p>Offline fallback. Configure server.url in capacitor.config.ts to your deployed Next.js app.</p>
+            </div>
+          </body>
+          </html>
+          EOF
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Build Debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cinestream-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Show APK info
+        run: |
+          ls -lh android/app/build/outputs/apk/debug/
+          APK_PATH=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -1)
+          if [ -n "$APK_PATH" ]; then
+            echo "Built APK: $APK_PATH"
+            file "$APK_PATH"
+            ls -lh "$APK_PATH"
+          fi

@@ -1,0 +1,5 @@
+cordova.variables={};
+// Extends cordova.variables here
+//pluginBuildExtras={
+//    apply from:  'some.gradle file'
+//}
